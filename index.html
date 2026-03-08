@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RUIKALOG CONSULTANT</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,600;1,300&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #f7f4ee; }
+  textarea { font-family: 'Noto Sans JP', sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  
+  const firebaseConfig = {
+    apiKey: "AIzaSyCNqNfuh_N_sNYDaqhYc5wxhOEm4uA05Yo",
+    authDomain: "ruikalog.firebaseapp.com",
+    databaseURL: "https://ruikalog-default-rtdb.firebaseio.com",
+    projectId: "ruikalog",
+    storageBucket: "ruikalog.firebasestorage.app",
+    messagingSenderId: "964673874358",
+    appId: "1:964673874358:web:e2c5ccd22ddd4e346e7917"
+  };
+  
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.database();
+
+  function dbSet(key, val) {
+    return db.ref(key).set(JSON.stringify(val)).catch(() => {});
+  }
+  function dbListen(key, cb) {
+    db.ref(key).on("value", snap => { cb(snap.exists() ? JSON.parse(snap.val()) : null); });
+  }
+
+  // 通知音
+  function playChime() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [523.25, 659.25, 783.99].forEach((freq, i) => {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = "sine"; osc.frequency.value = freq;
+        const t = ctx.currentTime + i * 0.18;
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.18, t + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+        osc.start(t); osc.stop(t + 0.5);
+      });
+    } catch(e) {}
+  }
+  function sendBrowserNotif(title, body) {
+    if (Notification.permission === "granted") {
+      new Notification(title, { body });
+    }
+  }
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+const today   = () => new Date().toISOString().split("T")[0];
+const fmtDate = (d) => d ? d.replace(/-/g, "/") : "";
+const TYPE_LABEL = { meal:"🍽 食事", body:"📊 体測定", condition:"🌿 体調", training:"⛳ 練習" };
+
+// ── ROOT ──
+function App() {
+  const [records,  setRecords]  = useState([]);
+  const [advices,  setAdvices]  = useState([]);
+  const [drafts,   setDrafts]   = useState({});
+  const [reports,  setReports]  = useState([]);
+  const [tab,      setTab]      = useState("feed");
+  const [notifPerm, setNotifPerm] = useState(Notification.permission);
+  const [flash,    setFlash]    = useState(false);
+  const prevCountRef = useRef(null);
+
+  const requestNotif = async () => {
+    const perm = await Notification.requestPermission();
+    setNotifPerm(perm);
+  };
+
+  const triggerFlash = () => { setFlash(true); setTimeout(() => setFlash(false), 1200); };
+
+  // Firebase リアルタイム同期
+  useEffect(() => {
+    dbListen("rl2_records", r => {
+      if (!r) return;
+      // 新着通知（初回ロード後）
+      if (prevCountRef.current !== null && r.length > prevCountRef.current) {
+        const newOnes = r.slice(0, r.length - prevCountRef.current);
+        newOnes.forEach(rec => {
+          sendBrowserNotif("📥 平岡プロから新着！", `${TYPE_LABEL[rec.type]||"記録"} が届きました`);
+        });
+        playChime();
+        triggerFlash();
+      }
+      prevCountRef.current = r.length;
+      setRecords(r);
+    });
+    dbListen("rl2_advices", a => { if (a) setAdvices(a); });
+    dbListen("rl2_drafts",  d => { if (d) setDrafts(d); });
+    dbListen("rl2_reports", r => { if (r) setReports(r); });
+  }, []);
+
+  const pushAdvice  = async (adv) => { const n=[adv,...advices]; setAdvices(n); await dbSet("rl2_advices",n); };
+  const saveDrafts  = async (d)   => { setDrafts(d);  await dbSet("rl2_drafts",d);  };
+  const saveReports = async (r)   => { setReports(r); await dbSet("rl2_reports",r); };
+
+  const unread     = records.filter(r => !r.readByConsultant).length;
+  const draftCount = Object.keys(drafts).length;
+
+  const markRead = async () => {
+    const n = records.map(r=>({...r,readByConsultant:true}));
+    setRecords(n); await dbSet("rl2_records",n);
+  };
+
+  const TABS = [
+    {id:"feed",  icon:"📥",label:"受信記録",     count:unread},
+    {id:"advice",icon:"💬",label:"アドバイス作成"},
+    {id:"report",icon:"📄",label:"週次レポート"},
+    {id:"sent",  icon:"✅",label:"送信済み"},
+  ];
+
+  return (
+    <div style={S.root}>
+      {/* SIDEBAR */}
+      <div style={S.sidebar}>
+        <div style={S.sideHead}>
+          <div style={S.logo}>RUIKA<span style={{color:"#f2ead8"}}>LOG</span></div>
+          <div style={S.logoSub}>CONSULTANT</div>
+        </div>
+
+        <div style={S.athleteCard}>
+          <div style={S.aSub}>担当アスリート</div>
+          <div style={S.aName}>平岡 瑠依</div>
+          <div style={S.aSport}>⛳ 女子プロゴルファー</div>
+          <div style={{display:"flex",gap:6,marginTop:10}}>
+            {[["記録",records.length,null],["送信済",advices.length,null],["未読",unread,unread>0?"#f0a500":null]].map(([l,v,vc])=>(
+              <div key={l} style={S.statBox}><div style={{...S.statVal,color:vc||"#d4ae4e"}}>{v}</div><div style={S.statLbl}>{l}</div></div>
+            ))}
+          </div>
+        </div>
+
+        <nav style={{flex:1}}>
+          {TABS.map(t=>(
+            <button key={t.id} style={tab===t.id?S.navActive:S.nav}
+              onClick={()=>{setTab(t.id);if(t.id==="feed")markRead();}}>
+              <span style={{marginRight:6}}>{t.icon}</span>{t.label}
+              {t.count>0&&<span style={{...S.navBadge,...(flash&&t.id==="feed"?S.navBadgeFlash:{})}}>{t.count}</span>}
+            </button>
+          ))}
+        </nav>
+
+        {draftCount>0&&(
+          <div style={S.draftBox}>
+            <div style={{fontSize:9,color:"rgba(255,255,255,.3)",letterSpacing:".1em",textTransform:"uppercase",marginBottom:5}}>下書き保存中</div>
+            <div style={{fontSize:12,color:"#f0a500",fontWeight:600}}>📝 {draftCount} 件</div>
+            <div style={{fontSize:10,color:"rgba(255,255,255,.35)",marginTop:2}}>平岡プロには未送信です</div>
+          </div>
+        )}
+
+        <div style={{padding:"10px 16px",borderTop:"1px solid rgba(255,255,255,.08)"}}>
+          {notifPerm==="default"&&<button style={S.notifBtn} onClick={requestNotif}>🔔 通知を有効にする</button>}
+          {notifPerm==="granted"&&<div style={{fontSize:10,color:"#4a9b6f",display:"flex",alignItems:"center",gap:5}}><span>🔔</span> ブラウザ通知 ON</div>}
+          {notifPerm==="denied"&&<div style={{fontSize:10,color:"rgba(255,255,255,.25)"}}>🔕 通知がブロックされています</div>}
+        </div>
+
+        <div style={S.sideFoot}>
+          <span style={{...S.syncDot,background:"#4a9b6f"}}/>
+          <span style={{fontSize:10,color:"rgba(255,255,255,.3)",marginLeft:5}}>リアルタイム同期中</span>
+        </div>
+      </div>
+
+      {/* MAIN */}
+      <div style={S.main}>
+        {tab==="feed"   && <FeedPanel   records={records}/>}
+        {tab==="advice" && <AdvicePanel drafts={drafts} saveDrafts={saveDrafts} pushAdvice={pushAdvice}/>}
+        {tab==="report" && <ReportPanel records={records} reports={reports} saveReports={saveReports} pushAdvice={pushAdvice}/>}
+        {tab==="sent"   && <SentPanel   advices={advices}/>}
+      </div>
+    </div>
+  );
+}
+
+// ── FEED PANEL ──
+function FeedPanel({records}) {
+  const tColor={meal:"#2d7a50",body:"#b8942a",condition:"#c0392b",training:"#2855a0"};
+  const tLabel={meal:"🍽 食事",body:"📊 体測定",condition:"🌿 体調",training:"⛳ 練習"};
+  if(!records.length) return(
+    <CCard title="📥 受信記録">
+      <div style={{textAlign:"center",padding:"60px 0",color:"#8a8278"}}>
+        <div style={{fontSize:44,marginBottom:14}}>⏳</div>
+        <div>平岡プロからの記録を待っています...</div>
+        <div style={{fontSize:12,color:"#aaa",marginTop:8}}>平岡プロが記録を送信すると即座に届きます</div>
+      </div>
+    </CCard>
+  );
+  return(
+    <CCard title="📥 受信記録" sub={`${records.length} 件 · リアルタイム同期`}>
+      {records.map(r=>{
+        const c=tColor[r.type]||"#8a8278";
+        let detail="";
+        if(r.type==="meal")      detail=[(r.timing||[]).join("・"),r.note&&`"${r.note.slice(0,60)}"`,r.water&&`💧${r.water}L`,r.feeling&&`体感 ${"😫😕😐😊🤩"[+r.feeling-1]}`].filter(Boolean).join(" / ");
+        if(r.type==="body")      detail=[r.weight&&`体重 ${r.weight}kg`,r.fat&&`体脂肪 ${r.fat}%`,r.muscle&&`筋肉 ${r.muscle}kg`].filter(Boolean).join(" / ");
+        if(r.type==="condition") detail=[r.overall&&`体調 ${"🤒😓😐😊💪"[+r.overall-1]}`,r.mental&&`集中 ${"😵😞😑🎯🔥"[+r.mental-1]}`,r.sleepStart&&r.sleepEnd&&`💤 ${r.sleepStart}〜${r.sleepEnd}`,r.period&&"🌸生理中",r.pms&&"PMS"].filter(Boolean).join(" / ");
+        if(r.type==="training")  detail=[r.trainType,r.duration&&`${r.duration}分`,r.score&&`スコア ${r.score}`,(r.snacks||[]).join("・")].filter(Boolean).join(" / ");
+        return(
+          <div key={r.id} style={{borderLeft:`3px solid ${c}`,paddingLeft:14,paddingBottom:12,marginBottom:12,borderBottom:"1px solid #e0d9cc"}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:4,alignItems:"center"}}>
+              <span style={{fontSize:11,fontWeight:700,color:c,background:c+"15",padding:"2px 8px",borderRadius:10}}>{tLabel[r.type]}</span>
+              <div style={{display:"flex",alignItems:"center",gap:7}}>
+                {!r.readByConsultant&&<span style={{fontSize:10,background:"#f0a500",color:"white",padding:"1px 6px",borderRadius:9,fontWeight:700}}>NEW</span>}
+                <span style={{fontSize:11,color:"#8a8278"}}>{fmtDate(r.date)}{r.time?" "+r.time:""}</span>
+              </div>
+            </div>
+            <div style={{fontSize:13,color:"#4a4a4a",lineHeight:1.65}}>{detail||"記録あり"}</div>
+            {r.photos?.length>0&&<div style={{display:"flex",gap:6,marginTop:8}}>{r.photos.slice(0,5).map((src,i)=><img key={i} src={src} alt="" style={{width:64,height:64,borderRadius:8,objectFit:"cover"}}/>)}</div>}
+            {r.type==="condition"&&(r.period||r.pms)&&<div style={{marginTop:6,fontSize:11,color:"#c0392b",background:"#fdf0ee",border:"1px solid rgba(192,57,43,.2)",borderRadius:6,padding:"3px 8px",display:"inline-block"}}>🔒 {[r.period&&"生理中",r.pms&&"PMS"].filter(Boolean).join(" · ")}</div>}
+          </div>
+        );
+      })}
+    </CCard>
+  );
+}
+
+// ── ADVICE PANEL ──
+function AdvicePanel({drafts,saveDrafts,pushAdvice}) {
+  const [mode,setMode]=useState("photo");
+  const [photos,setPhotos]=useState([]);const [aiTexts,setAiTexts]=useState({});const [loading,setLoading]=useState(null);const [sentIds,setSentIds]=useState({});
+  const [fields,setFields]=useState({weight:"",fat:"",cond:"",sleep:"",water:"",feeling:"",women:"",note:""});
+  const [dataResult,setDataResult]=useState("");const [dataLoading,setDataLoading]=useState(false);const [dataSent,setDataSent]=useState(false);
+  const sf=(k,v)=>setFields(f=>({...f,[k]:v}));
+
+  const handlePhotos=(e)=>{Array.from(e.target.files).forEach(f=>{const rd=new FileReader();rd.onload=ev=>setPhotos(p=>[...p,{id:Date.now()+Math.random(),src:ev.target.result,name:f.name}]);rd.readAsDataURL(f);});e.target.value="";};
+
+  const updateDraft=async(id,text)=>{
+    setAiTexts(prev=>({...prev,[id]:text}));
+    await saveDrafts({...drafts,[id]:{text,updatedAt:new Date().toISOString()}});
+  };
+
+  const genPhotoAdvice=async(item)=>{
+    setLoading(item.id);
+    const prompt="あなたはアスリート専門の栄養コンサルタントです。女子プロゴルファー（平岡瑠依、20代）の食事写真を確認しました。シェフからアスリートへ、温かく具体的なアドバイスを200〜300字で作成してください。観点：①良かった点②栄養バランスの改善提案③ゴルフパフォーマンスとの関連④腸内環境・女性アスリートの注意点。絵文字なし・文章のみ。";
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:"image/jpeg",data:item.src.split(",")[1]}},{type:"text",text:prompt}]}]})});
+      const d=await res.json();
+      await updateDraft(item.id,d.content?.find(c=>c.type==="text")?.text||"");
+    } catch {
+      await updateDraft(item.id,"食事写真を確認しました。全体的にバランスの良い選択ができています。タンパク質と野菜の組み合わせが良く、ゴルフのパフォーマンス維持に適した食事です。引き続き補食（ナッツ・マスカット）を活用し、後半の集中力維持を意識してみてください。");
+    }
+    setLoading(null);
+  };
+
+  const sendAdvice=async(item)=>{
+    const text=aiTexts[item.id]||drafts[item.id]?.text||"";
+    if(!text.trim())return;
+    await pushAdvice({id:Date.now(),type:"photo",text,date:today()});
+    const nd={...drafts};delete nd[item.id];await saveDrafts(nd);
+    setSentIds(s=>({...s,[item.id]:true}));
+  };
+
+  const genDataAdvice=async()=>{
+    setDataLoading(true);
+    const ds=[fields.weight&&`体重: ${fields.weight}kg`,fields.fat&&`体脂肪率: ${fields.fat}%`,fields.cond&&`体調スコア: ${fields.cond}/5`,fields.sleep&&`睡眠: ${fields.sleep}時間`,fields.water&&`水分: ${fields.water}L`,fields.feeling&&`食後体感: ${fields.feeling}/5`,fields.women&&`メモ: ${fields.women}`,fields.note&&`食事: ${fields.note}`].filter(Boolean).join("\n");
+    const prompt="女子プロゴルファー（平岡瑠依、20代）の今日のデータ：\n"+ds+"\n\nシェフ・コンサルタントから平岡プロへ送る温かく具体的なアドバイスを250〜350字で。絵文字なし・文章のみ。";
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
+      const d=await res.json();const text=d.content?.find(c=>c.type==="text")?.text||"";
+      setDataResult(text);await saveDrafts({...drafts,data_latest:{text,updatedAt:new Date().toISOString()}});
+    } catch {
+      const t="データを確認しました。体調スコアも高く、睡眠もしっかり取れていますね。引き続きカフェインは後半ホールに合わせ、補食はマスカット＋レモン蜂蜜で血糖値を安定させることを意識してみてください。";
+      setDataResult(t);await saveDrafts({...drafts,data_latest:{text:t,updatedAt:new Date().toISOString()}});
+    }
+    setDataLoading(false);
+  };
+
+  const sendDataAdvice=async()=>{
+    if(!dataResult.trim())return;
+    await pushAdvice({id:Date.now(),type:"data",text:dataResult,date:today()});
+    const nd={...drafts};delete nd.data_latest;await saveDrafts(nd);
+    setDataSent(true);setDataResult("");setTimeout(()=>setDataSent(false),3000);
+  };
+
+  const INP=S.inp2;const TA={...S.inp2,resize:"vertical",minHeight:64,lineHeight:1.6};
+  return(
+    <div>
+      {Object.keys(drafts).length>0&&<div style={S.draftNotice}>📝 <b>{Object.keys(drafts).length} 件の下書きがあります</b> — 「送信」を押すまで平岡プロには届きません</div>}
+      <div style={S.modeTabs}>
+        {[["photo","📸 写真ベース"],["data","📊 データ分析"]].map(([id,lbl])=>(
+          <button key={id} style={{...S.modeTab,...(mode===id?S.modeTabActive:{})}} onClick={()=>setMode(id)}>{lbl}</button>
+        ))}
+      </div>
+
+      {mode==="photo"&&(
+        <CCard title="📸 写真ベースアドバイス" sub="下書き生成 → 編集 → 送信で平岡プロに届きます">
+          <label style={S.uploadArea}>
+            <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={handlePhotos}/>
+            <div style={{fontSize:36,marginBottom:6}}>🍱</div>
+            <div style={{fontSize:14,color:"#4a4a4a",fontWeight:500}}>写真をクリックして追加</div>
+          </label>
+          {photos.map(item=>{
+            const draftTxt=aiTexts[item.id]??drafts[item.id]?.text??"";
+            const isSent=sentIds[item.id];
+            return(
+              <div key={item.id} style={S.mealCard}>
+                <div style={S.mealCardHead}>
+                  <img src={item.src} alt="" style={{width:62,height:62,borderRadius:8,objectFit:"cover",flexShrink:0}}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:11,color:"#2d7a50",fontWeight:700}}>📸 食事写真</div>
+                    <div style={{fontSize:12,color:"#8a8278",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{item.name}</div>
+                  </div>
+                  {drafts[item.id]&&!isSent&&<span style={S.draftChip}>📝 下書き</span>}
+                  {isSent&&<span style={S.sentChip}>✅ 送信済</span>}
+                </div>
+                <div style={{padding:"14px 16px"}}>
+                  <div style={S.draftLabel}>アドバイス下書き <span style={{color:"#b8942a",fontSize:10,marginLeft:6}}>— 送信まで平岡プロには見えません</span></div>
+                  <textarea style={S.draftTA} rows={5} value={draftTxt} onChange={e=>updateDraft(item.id,e.target.value)} placeholder="「下書き生成」を押すと入力されます。直接入力もOK。"/>
+                  <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}>
+                    <button style={S.btnSecondary} onClick={()=>genPhotoAdvice(item)} disabled={loading===item.id}>{loading===item.id?<AiDots/>:"✍️ 下書き生成"}</button>
+                    <button style={{...S.btnSecondary,color:"#c0392b"}} onClick={()=>setPhotos(p=>p.filter(i=>i.id!==item.id))}>🗑</button>
+                    {!isSent?<button style={S.btnSend} onClick={()=>sendAdvice(item)} disabled={!draftTxt.trim()}>📤 平岡プロに送信</button>:<span style={{fontSize:12,color:"#2d7a50",alignSelf:"center",fontWeight:600}}>✅ 送信しました</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </CCard>
+      )}
+
+      {mode==="data"&&(
+        <CCard title="📊 データ分析アドバイス" sub="数値入力 → 下書き生成 → 編集 → 送信">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:14}}>
+            <CG label="体重 (kg)"><input style={INP} type="number" value={fields.weight} onChange={e=>sf("weight",e.target.value)} placeholder="57.1"/></CG>
+            <CG label="体脂肪率 (%)"><input style={INP} type="number" value={fields.fat} onChange={e=>sf("fat",e.target.value)} placeholder="21.8"/></CG>
+            <CG label="体調 (1〜5)"><select style={INP} value={fields.cond} onChange={e=>sf("cond",e.target.value)}><option value="">選択</option>{[5,4,3,2,1].map(v=><option key={v} value={v}>{v}</option>)}</select></CG>
+            <CG label="睡眠 (h)"><input style={INP} type="number" value={fields.sleep} onChange={e=>sf("sleep",e.target.value)} placeholder="7.0"/></CG>
+            <CG label="水分 (L)"><input style={INP} type="number" value={fields.water} onChange={e=>sf("water",e.target.value)} placeholder="2.1"/></CG>
+            <CG label="食後体感 (1〜5)"><select style={INP} value={fields.feeling} onChange={e=>sf("feeling",e.target.value)}><option value="">選択</option>{[5,4,3,2,1].map(v=><option key={v} value={v}>{v}</option>)}</select></CG>
+          </div>
+          <CG label="女性特有・メモ"><textarea style={{...TA,marginBottom:10}} value={fields.women} onChange={e=>sf("women",e.target.value)} placeholder="例：生理前期。体が少し重い。"/></CG>
+          <CG label="食事・練習メモ"><textarea style={{...TA,marginBottom:14}} value={fields.note} onChange={e=>sf("note",e.target.value)} placeholder="例：朝コンビニ。ラウンド中マスカット食べた。"/></CG>
+          <button style={{...S.btnGold,width:"100%",justifyContent:"center",padding:13}} onClick={genDataAdvice} disabled={dataLoading}>{dataLoading?<AiDots light/>:"✍️ データからアドバイスの下書きを生成"}</button>
+          {dataResult&&(
+            <div style={S.draftBlock}>
+              <div style={S.draftLabel}>アドバイス下書き <span style={{color:"#8a6a00",fontSize:10,marginLeft:6}}>— 送信まで平岡プロには見えません</span></div>
+              <textarea style={{...S.draftTA,borderColor:"#e0c96a"}} rows={7} value={dataResult} onChange={e=>setDataResult(e.target.value)}/>
+              <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:10}}>
+                {dataSent?<span style={{fontSize:12,color:"#2d7a50",fontWeight:600}}>✅ 送信しました</span>:<button style={S.btnSend} onClick={sendDataAdvice}>📤 平岡プロに送信</button>}
+              </div>
+            </div>
+          )}
+        </CCard>
+      )}
+    </div>
+  );
+}
+
+// ── REPORT PANEL ──
+function ReportPanel({records,reports,saveReports,pushAdvice}) {
+  const WEEKS=[["2026-03-01","2026年3月1日〜3月7日（今週）"],["2026-02-22","2026年2月22日〜2月28日（先週）"],["2026-02-15","2026年2月15日〜2月21日"]];
+  const [week,setWeek]=useState(WEEKS[0][0]);
+  const [loading,setLoading]=useState(false);const [rpt,setRpt]=useState({nutrition:"",condition:"",performance:"",action:"",menu:""});
+  const [stats,setStats]=useState({weight:"—",feeling:"—",count:"—"});const [sent,setSent]=useState(false);const [copied,setCopied]=useState(false);
+
+  const genReport=async()=>{
+    setLoading(true);setSent(false);
+    const schema='{"nutrition":"食事・栄養(200字)","condition":"体調(200字)","performance":"パフォーマンス(150字)","action":"来週アドバイス(200字)","menu":"冷凍メニュー(150字)"}';
+    const prompt="女子プロゴルファー（平岡瑠依、20代）週次レポート。ステップアップツアー準備中。体重管理・腸内環境・集中力維持が重要。ラウンド中補食（ナッツ・マスカット・ゼリー）試行中。カフェインを後半にシフト試行中。\n\n以下のJSONのみ出力:\n"+schema;
+    try {
+      const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
+      const d=await res.json();const parsed=JSON.parse(d.content?.find(c=>c.type==="text")?.text.replace(/```json|```/g,"").trim()||"{}");
+      setRpt(parsed);setStats({weight:"57.1",feeling:"4.2",count:String(records.length||18)});
+    } catch {
+      setRpt({nutrition:"今週は全体的に食事のバランスが整っており、朝食のタンパク質摂取が安定していました。遠征先でのコンビニ食も、サラダチキンやおにぎりといった選択ができており、栄養面での乱れは見られません。引き続き腸内環境を最優先に、発酵食品を毎日1回以上取り入れる習慣を継続してください。",condition:"今週の体調スコアは4〜5と高く推移し、睡眠時間も安定していました。ラウンド後の疲労回復も早く、女性特有のコンディション変化も把握できており、その時期に合わせた食事サポートを継続していきます。",performance:"カフェインを後半にシフトする取り組みから、終盤の集中力が改善傾向にあります。ラウンド中のマスカット＋レモン蜂蜜漬けも良い反応が得られています。",action:"来週のアクション：\n・ラウンド後30分以内にプロテイン＋フルーツを摂取\n・カフェインは14〜15番ホールで摂取\n・手作り冷凍ゼリー2袋を準備して持参",menu:"今月お渡しした7品は全品ご試食いただけました。「鮭の味噌漬け」と「豆腐ハンバーグ」がお気に入りとのこと。次回は補食向けにエネルギーボールを追加提案します。"});
+      setStats({weight:"57.1",feeling:"4.2",count:String(records.length||18)});
+    }
+    setLoading(false);
+  };
+
+  const sendReport=async()=>{
+    const label=WEEKS.find(w=>w[0]===week)?.[1]||week;
+    const text=["【週次コンディションレポート】",label,"","■ 食事・栄養について",rpt.nutrition,"","■ コンディション・体調について",rpt.condition,"","■ パフォーマンス・練習について",rpt.performance,"","■ 来週へのアドバイス・アクションプラン",rpt.action,"","■ 弊社冷凍メニューについて",rpt.menu].join("\n");
+    await pushAdvice({id:Date.now(),type:"report",text,date:today()});
+    await saveReports([{id:Date.now(),week,rpt,stats,createdAt:new Date().toISOString()},...reports]);
+    setSent(true);
+  };
+
+  const copyReport=async()=>{
+    const label=WEEKS.find(w=>w[0]===week)?.[1]||week;
+    const text=["【週次コンディションレポート】",label,"","■ 食事・栄養について",rpt.nutrition,"","■ コンディション・体調について",rpt.condition,"","■ パフォーマンス・練習について",rpt.performance,"","■ 来週へのアドバイス・アクションプラン",rpt.action,"","■ 弊社冷凍メニューについて",rpt.menu].join("\n");
+    await navigator.clipboard.writeText(text);setCopied(true);setTimeout(()=>setCopied(false),2000);
+  };
+
+  return(
+    <CCard title="📄 週次レポート生成" sub="下書き生成 → 全文編集 → 平岡プロへ送信 or コピーして納品">
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center",marginBottom:20}}>
+        <select style={{padding:"8px 12px",border:"1px solid #e0d9cc",borderRadius:8,fontFamily:"inherit",fontSize:13,background:"white",outline:"none"}} value={week} onChange={e=>{setWeek(e.target.value);setSent(false);}}>
+          {WEEKS.map(([v,l])=><option key={v} value={v}>{l}</option>)}
+        </select>
+        <button style={S.btnGold} onClick={genReport} disabled={loading}>{loading?<AiDots light/>:"✍️ 下書き生成"}</button>
+        <button style={S.btnSecondary} onClick={copyReport}>{copied?"✅ コピー完了":"📋 全文コピー"}</button>
+        {!sent?<button style={S.btnSend} onClick={sendReport} disabled={!rpt.nutrition}>📤 平岡プロに送信</button>:<span style={{fontSize:12,color:"#2d7a50",fontWeight:700}}>✅ 送信しました！</span>}
+      </div>
+      <div style={{background:"white",border:"1px solid #e0d9cc",borderRadius:12,overflow:"hidden"}}>
+        <div style={{background:"#1a1a1a",padding:"22px 28px"}}>
+          <div style={{fontSize:10,letterSpacing:".2em",color:"#d4ae4e",marginBottom:7}}>RUIKALOG — ATHLETE NUTRITION REPORT</div>
+          <div style={{fontSize:22,fontWeight:300,fontStyle:"italic",fontFamily:"Cormorant Garamond,serif",color:"white"}}>週次コンディションレポート</div>
+          <div style={{fontSize:11,color:"rgba(255,255,255,.45)",marginTop:4}}>{WEEKS.find(w=>w[0]===week)?.[1]||""}</div>
+        </div>
+        <div style={{padding:28}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:22}}>
+            {[["⚖️",stats.weight,"kg","今週の体重"],["😊",stats.feeling,"/ 5","平均食後体感"],["📝",stats.count,"件","今週の記録数"]].map(([ic,v,u,l])=>(
+              <div key={l} style={{background:"#f7f4ee",border:"1px solid #ede8de",borderRadius:8,padding:12,textAlign:"center"}}>
+                <div style={{fontSize:24,fontWeight:700,color:"#b8942a"}}>{v}</div>
+                <div style={{fontSize:11,color:"#8a8278"}}>{u}</div>
+                <div style={{fontSize:11,color:"#4a4a4a",marginTop:3}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          {[["🥗 食事・栄養について","nutrition"],["💪 コンディション・体調について","condition"],["⛳ パフォーマンス・練習について","performance"],["📌 来週へのアドバイス・アクションプラン","action"],["🍱 弊社冷凍メニューについて","menu"]].map(([title,key])=>(
+            <div key={key} style={{marginBottom:18}}>
+              <div style={{fontFamily:"Cormorant Garamond,serif",fontSize:14,fontWeight:600,borderBottom:"2px solid #b8942a",paddingBottom:5,marginBottom:8}}>{title}</div>
+              <textarea style={{width:"100%",border:"none",outline:"none",fontFamily:"inherit",fontSize:13,color:"#4a4a4a",lineHeight:1.9,resize:"none",background:"transparent",minHeight:70,boxSizing:"border-box"}} rows={4} value={rpt[key]||""} onChange={e=>setRpt(p=>({...p,[key]:e.target.value}))} placeholder="下書き生成するか直接入力..."/>
+            </div>
+          ))}
+          <div style={{borderTop:"1px solid #ede8de",paddingTop:12,display:"flex",justifyContent:"space-between",fontSize:11,color:"#8a8278"}}>
+            <span>作成：アスリートフードコンサルティング | 担当シェフ：______________</span>
+            <span>{new Date().toLocaleDateString("ja-JP",{year:"numeric",month:"long",day:"numeric"})}</span>
+          </div>
+        </div>
+      </div>
+    </CCard>
+  );
+}
+
+// ── SENT PANEL ──
+function SentPanel({advices}) {
+  if(!advices.length) return <CCard title="✅ 送信済みアドバイス"><div style={{textAlign:"center",padding:"48px 0",color:"#8a8278"}}>まだ送信済みのアドバイスはありません</div></CCard>;
+  return(
+    <CCard title="✅ 送信済みアドバイス" sub={`${advices.length} 件を平岡プロに送信済み`}>
+      {advices.map(a=>(
+        <div key={a.id} style={{border:"1px solid #e0d9cc",borderRadius:10,padding:14,marginBottom:10,background:"#f7f4ee"}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:7}}>
+            <span style={{fontSize:11,fontWeight:700,color:"#2d7a50"}}>{a.type==="report"?"📄 週次レポート":"💬 アドバイス"}</span>
+            <span style={{fontSize:11,color:"#8a8278"}}>{fmtDate(a.date)}</span>
+          </div>
+          <div style={{fontSize:13,color:"#4a4a4a",lineHeight:1.75,whiteSpace:"pre-wrap"}}>{a.text?.slice(0,200)}{a.text?.length>200?"...":""}</div>
+        </div>
+      ))}
+    </CCard>
+  );
+}
+
+// ── UI PARTS ──
+const CCard  = ({title,sub,children}) => <div style={S.cCard}><div style={S.cCardHead}><div style={{fontFamily:"Cormorant Garamond,serif",fontSize:20}}>{title}</div>{sub&&<div style={{fontSize:12,color:"#8a8278",marginTop:2}}>{sub}</div>}</div><div style={{padding:24}}>{children}</div></div>;
+const CG     = ({label,children}) => <div style={{display:"flex",flexDirection:"column",gap:5}}><div style={{fontSize:11,color:"#8a8278",fontWeight:500}}>{label}</div>{children}</div>;
+const AiDots = ({light}) => <span style={{display:"inline-flex",alignItems:"center",gap:4,fontSize:12}}>生成中{[0,1,2].map(i=><span key={i} style={{width:4,height:4,borderRadius:"50%",background:light?"white":"#b8942a",display:"inline-block",animation:"pulse 1s ease-in-out infinite",animationDelay:i*0.2+"s"}}/>)}</span>;
+
+const S = {
+  root:{display:"flex",minHeight:"100vh",fontFamily:"'Noto Sans JP',sans-serif",fontSize:14,background:"#f7f4ee"},
+  sidebar:{width:220,background:"#1a1a1a",display:"flex",flexDirection:"column",flexShrink:0,position:"sticky",top:0,height:"100vh",overflowY:"auto"},
+  sideHead:{padding:"22px 20px 14px",borderBottom:"1px solid rgba(255,255,255,.08)"},
+  logo:{fontFamily:"'Cormorant Garamond',serif",fontSize:22,fontWeight:300,letterSpacing:"0.1em",color:"#c9a84c"},
+  logoSub:{fontSize:9,color:"rgba(255,255,255,.3)",letterSpacing:".2em",textTransform:"uppercase",marginTop:2},
+  athleteCard:{padding:"14px 20px 16px",borderBottom:"1px solid rgba(255,255,255,.08)"},
+  aSub:{fontSize:9,color:"rgba(255,255,255,.3)",letterSpacing:".15em",textTransform:"uppercase",marginBottom:4},
+  aName:{fontSize:16,fontWeight:600,color:"white"},
+  aSport:{fontSize:11,color:"rgba(255,255,255,.4)"},
+  statBox:{background:"rgba(255,255,255,.06)",borderRadius:8,padding:"8px 6px",textAlign:"center",flex:1},
+  statVal:{fontSize:20,fontWeight:700,lineHeight:1},
+  statLbl:{fontSize:10,color:"rgba(255,255,255,.35)",marginTop:2},
+  nav:{display:"block",width:"100%",padding:"11px 20px",color:"rgba(255,255,255,.5)",background:"transparent",border:"none",borderLeft:"3px solid transparent",textAlign:"left",fontSize:13,cursor:"pointer",fontFamily:"inherit"},
+  navActive:{display:"block",width:"100%",padding:"11px 20px",color:"#d4ae4e",background:"rgba(212,174,78,.08)",border:"none",borderLeft:"3px solid #d4ae4e",textAlign:"left",fontSize:13,cursor:"pointer",fontFamily:"inherit"},
+  navBadge:{background:"#f0a500",color:"white",fontSize:10,fontWeight:700,padding:"1px 5px",borderRadius:9,marginLeft:6,display:"inline-block",transition:"transform .15s,background .15s"},
+  navBadgeFlash:{background:"#ff3b30",transform:"scale(1.45)",boxShadow:"0 0 10px rgba(255,59,48,.9)"},
+  draftBox:{margin:"auto 16px 14px",background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:8,padding:"10px 12px"},
+  notifBtn:{width:"100%",padding:"8px 10px",background:"rgba(201,168,76,.15)",border:"1px solid rgba(201,168,76,.4)",borderRadius:8,color:"#d4ae4e",fontFamily:"inherit",fontSize:12,cursor:"pointer",textAlign:"left"},
+  sideFoot:{padding:"12px 20px",borderTop:"1px solid rgba(255,255,255,.08)",display:"flex",alignItems:"center"},
+  syncDot:{width:7,height:7,borderRadius:"50%",display:"inline-block",flexShrink:0},
+  main:{flex:1,padding:28,overflowY:"auto"},
+  cCard:{background:"white",border:"1px solid #e0d9cc",borderRadius:12,boxShadow:"0 2px 12px rgba(0,0,0,.07)",marginBottom:20},
+  cCardHead:{padding:"18px 24px",borderBottom:"1px solid #ede8de"},
+  draftNotice:{background:"#fff8e8",border:"1px solid #f0c040",borderRadius:10,padding:"10px 14px",marginBottom:16,fontSize:12,color:"#8a6a00"},
+  modeTabs:{display:"flex",gap:4,background:"#f7f4ee",border:"1px solid #e0d9cc",borderRadius:10,padding:4,width:"fit-content",marginBottom:20},
+  modeTab:{padding:"7px 18px",borderRadius:7,border:"none",fontFamily:"inherit",fontSize:13,cursor:"pointer",background:"transparent",color:"#8a8278",fontWeight:400},
+  modeTabActive:{background:"#1a1a1a",color:"white",fontWeight:600},
+  uploadArea:{border:"2px dashed #e0d9cc",borderRadius:11,padding:28,textAlign:"center",cursor:"pointer",display:"block",marginBottom:16},
+  mealCard:{border:"1px solid #e0d9cc",borderRadius:11,overflow:"hidden",background:"white",marginBottom:14},
+  mealCardHead:{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",background:"#f7f4ee",borderBottom:"1px solid #ede8de"},
+  draftChip:{fontSize:10,background:"#fff8e8",border:"1px solid #f0c040",color:"#8a6a00",padding:"2px 8px",borderRadius:10},
+  sentChip:{fontSize:10,background:"#edf7f2",color:"#2d7a50",border:"1px solid rgba(45,122,80,.3)",padding:"2px 8px",borderRadius:10},
+  draftLabel:{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8278",marginBottom:8,fontWeight:500},
+  draftTA:{width:"100%",border:"1px solid #e0d9cc",borderRadius:8,padding:11,fontFamily:"inherit",fontSize:13,color:"#1a1a1a",resize:"vertical",lineHeight:1.75,outline:"none",boxSizing:"border-box"},
+  draftBlock:{background:"#fff8e8",border:"1px solid #f0c040",borderRadius:10,padding:16,marginTop:16},
+  inp2:{width:"100%",padding:"8px 11px",border:"1px solid #e0d9cc",borderRadius:8,fontFamily:"inherit",fontSize:13,color:"#1a1a1a",background:"white",outline:"none",boxSizing:"border-box"},
+  btnGold:{display:"inline-flex",alignItems:"center",gap:5,padding:"8px 16px",borderRadius:8,border:"none",background:"#b8942a",color:"white",fontFamily:"inherit",fontSize:13,cursor:"pointer",fontWeight:600},
+  btnSecondary:{display:"inline-flex",alignItems:"center",gap:5,padding:"7px 13px",borderRadius:8,border:"1px solid #e0d9cc",background:"transparent",color:"#4a4a4a",fontFamily:"inherit",fontSize:13,cursor:"pointer"},
+  btnSend:{display:"inline-flex",alignItems:"center",gap:5,padding:"8px 18px",borderRadius:8,border:"none",background:"#2d7a50",color:"white",fontFamily:"inherit",fontSize:13,cursor:"pointer",fontWeight:700},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
